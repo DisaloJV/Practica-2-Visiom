@@ -1,0 +1,87 @@
+import os
+import sys
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+if len(sys.argv) > 1:
+    RUTA = sys.argv[1]
+else:
+    RUTA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "abc.png")
+
+GAMMA = 0.5           
+SIGMA_SUAVE = 5        
+SIGMA_FONDO = 60       
+FACTOR_OTSU = 1.10     
+KERNEL_APERTURA = 21   
+KERNEL_CIERRE = 25    
+
+
+if not os.path.isfile(RUTA):
+    sys.exit(f"No existe el archivo: {RUTA}\nPasa la ruta completa como argumento.")
+
+img = cv2.imdecode(np.fromfile(RUTA, dtype=np.uint8), cv2.IMREAD_COLOR)
+if img is None:
+    sys.exit(f"No se pudo decodificar como imagen: {RUTA}")
+carpeta_salida = os.path.dirname(os.path.abspath(RUTA))
+
+
+def guardar(nombre, imagen):
+    """Guarda una imagen (compatible con rutas Windows con espacios/acentos)."""
+    ok, buf = cv2.imencode(".png", imagen)
+    if ok:
+        buf.tofile(os.path.join(carpeta_salida, nombre))
+
+
+canal_max = img.max(axis=2).astype(np.float32)
+p_bajo, p_alto = np.percentile(canal_max, (1, 99.8))
+estirada = np.clip((canal_max - p_bajo) / max(p_alto - p_bajo, 1), 0, 1)
+estirada = (estirada ** GAMMA * 255).astype(np.uint8)
+realzada = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(estirada)
+
+
+suave = cv2.GaussianBlur(estirada, (0, 0), SIGMA_SUAVE)
+fondo = cv2.GaussianBlur(estirada, (0, 0), SIGMA_FONDO)
+plana = cv2.normalize(suave.astype(np.float32) - fondo,
+                      None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
+
+t_otsu, _ = cv2.threshold(plana, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+_, binaria = cv2.threshold(plana, t_otsu * FACTOR_OTSU, 255, cv2.THRESH_BINARY)
+
+def el(n):
+    return cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (n, n))
+
+abierta = cv2.morphologyEx(binaria, cv2.MORPH_OPEN, el(KERNEL_APERTURA))
+cerrada = cv2.morphologyEx(abierta, cv2.MORPH_CLOSE, el(KERNEL_CIERRE))
+gradiente = cv2.morphologyEx(cerrada, cv2.MORPH_GRADIENT, el(5))
+
+
+bajo, alto = int(0.35 * t_otsu), int(0.70 * t_otsu)
+bordes = cv2.Canny(plana, bajo, alto)
+bordes_mask = cv2.dilate(cv2.Canny(cerrada, 50, 150), el(3))
+
+final = cv2.GaussianBlur(realzada, (0, 0), 1.5)
+
+paneles = [
+    ("Original", cv2.cvtColor(img, cv2.COLOR_BGR2RGB), None),
+    ("Contraste + gamma + CLAHE", realzada, "gray"),
+    (f"Gauss σ={SIGMA_SUAVE} - fondo", plana, "gray"),
+    ("Umbral Otsu", binaria, "gray"),
+    ("Apertura (quita ruido)", abierta, "gray"),
+    ("Cierre (une partes)", cerrada, "gray"),
+    ("Gradiente morfológico", gradiente, "gray"),
+    (f"Canny sobre imagen ({bajo}/{alto})", bordes, "gray"),
+    ("Canny sobre máscara", bordes_mask, "gray"),
+    ("Resultado final", final, "gray"),
+]
+fig, ejes = plt.subplots(2, 5, figsize=(24, 9))
+for ax, (titulo, im, cmap) in zip(ejes.ravel(), paneles):
+    ax.imshow(im, cmap=cmap)
+    ax.set_title(titulo, fontsize=10)
+    ax.axis("off")
+plt.tight_layout()
+plt.savefig(os.path.join(carpeta_salida, "resultado_panel.png"), dpi=110)
+guardar("resultado_final.png", final)
+print(f"Resultados guardados en: {carpeta_salida}")
+plt.show()
