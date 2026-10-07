@@ -1,0 +1,138 @@
+# -*- coding: utf-8 -*-
+import cv2
+import numpy as np
+import matplotlib.pyplot as plt
+
+RUTA = r"Rin.png"
+RADIO_MIN = 28
+RADIO_MAX = 45
+
+# 1) Imagen original
+img = cv2.imread(RUTA)
+if img is None:
+    raise FileNotFoundError(f"No pude abrir la imagen: {RUTA}")
+img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+# 2) Escala de grises
+gris = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+# 3) Mejora de contraste (CLAHE)
+clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+contraste = clahe.apply(gris)
+
+# 4) Desenfoque para quitar ruido (la textura del piso y el rin)
+blur = cv2.GaussianBlur(contraste, (9, 9), 2)
+
+# 5) Bordes 
+bordes = cv2.Canny(blur, 50, 120)
+
+# 6) Deteccion de circulos con Hough
+circulos = cv2.HoughCircles(
+    blur, cv2.HOUGH_GRADIENT, dp=1.2, minDist=60,
+    param1=120, param2=30, minRadius=RADIO_MIN, maxRadius=RADIO_MAX)
+
+if circulos is None:
+    circulos = np.empty((0, 3))
+else:
+    circulos = circulos[0]
+
+# 7) Circulos
+h, w = gris.shape
+centro = np.array([w / 2, h / 2])
+dist = np.linalg.norm(circulos[:, :2] - centro, axis=1)
+validos = circulos[(dist > 0.05 * w) & (dist < 0.20 * w)]
+
+# Numeración
+ang = np.arctan2(validos[:, 1] - centro[1], validos[:, 0] - centro[0])
+validos = validos[np.argsort(ang)]
+
+# 8) Imagen final
+final = img_rgb.copy()
+for i, (x, y, r) in enumerate(validos, start=1):
+    x, y, r = int(x), int(y), int(r)
+    cv2.circle(final, (x, y), r, (0, 255, 0), 2)          # contorno
+    cv2.circle(final, (x, y), 5, (255, 0, 0), -1)         # puntito rojo
+    cv2.putText(final, str(i), (x + r + 8, y + 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 0), 4)
+    cv2.putText(final, str(i), (x + r + 8, y + 8),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 0), 2)
+
+total = len(validos)
+cv2.putText(final, f"Total de huecos: {total}", (30, 60),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.6, (255, 255, 255), 6)
+cv2.putText(final, f"Total de huecos: {total}", (30, 60),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.6, (200, 0, 0), 3)
+
+#Rin se segmenta el rin (zona clara) del piso con umbral de Otsu
+#se limpia con operaciones morfologicas y se toma el contorno mas grande.
+_, mascara = cv2.threshold(cv2.GaussianBlur(gris, (9, 9), 2), 0, 255,
+                           cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (25, 25))
+mascara = cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, kernel)
+mascara = cv2.morphologyEx(mascara, cv2.MORPH_OPEN, kernel)
+contornos, _ = cv2.findContours(mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+contorno_rin = max(contornos, key=cv2.contourArea)
+
+area_rin = cv2.contourArea(contorno_rin)                       # area en px^2
+(cx_rin, cy_rin), radio_rin = cv2.minEnclosingCircle(contorno_rin)  # radio en px
+radio_equiv = np.sqrt(area_rin / np.pi)                        # radio equivalente al area
+diametro_rin = 2 * radio_rin
+
+# Dibujar contorno del rin
+cv2.drawContours(final, [contorno_rin], -1, (255, 0, 255), 4)
+cv2.circle(final, (int(cx_rin), int(cy_rin)), 8, (255, 0, 255), -1)
+cv2.putText(final, "Rin", (int(cx_rin) - 40, int(cy_rin + radio_rin) - 95),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 6)
+cv2.putText(final, "Rin", (int(cx_rin) - 40, int(cy_rin + radio_rin) - 95),
+            cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 0, 255), 3)
+
+print("\nRIN (contorno exterior):")
+print(f"  Centro   = ({cx_rin:.0f}, {cy_rin:.0f}) px")
+print(f"  Radio    = {radio_rin:.1f} px   (circulo que encierra el rin)")
+print(f"  Radio equivalente = {radio_equiv:.1f} px   (a partir del area)")
+print(f"  Diametro = {diametro_rin:.1f} px")
+print(f"  Area     = {area_rin:.0f} px^2")
+print()
+
+print(f"Huecos detectados: {total}")
+for i, (x, y, r) in enumerate(validos, start=1):
+    print(f"  Hueco {i}: centro=({x:.0f}, {y:.0f})  radio={r:.0f}px")
+
+pasos = [
+    ("1. Original", img_rgb, None),
+    ("2. Escala de grises", gris, "gray"),
+    ("3. Contraste (CLAHE)", contraste, "gray"),
+    ("4. Desenfoque gaussiano", blur, "gray"),
+    ("5. Bordes (Canny)", bordes, "gray"),
+    (f"6. Resultado: {total} huecos", final, None),
+]
+fig, ejes = plt.subplots(2, 3, figsize=(18, 10))
+for ax, (titulo, im, cmap) in zip(ejes.ravel(), pasos):
+    ax.imshow(im, cmap=cmap)
+    ax.set_title(titulo, fontsize=14)
+    ax.axis("off")
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(10, 8))
+plt.imshow(final)
+plt.title(f"Huecos contados: {total}", fontsize=16)
+plt.axis("off")
+plt.show()
+cv2.imwrite("rin_resultado.png", cv2.cvtColor(final, cv2.COLOR_RGB2BGR))
+
+detalle = [
+    ("Imagen original\n(sin procesos)", img_rgb, None),
+    ("Escala de grises\nProcesos: BGR -> Gris", gris, "gray"),
+    ("Contraste CLAHE\nProcesos: Gris -> CLAHE", contraste, "gray"),
+    ("Desenfoque gaussiano\nProcesos: Gris -> CLAHE -> GaussianBlur", blur, "gray"),
+    ("Bordes Canny\nProcesos: Gris -> CLAHE -> GaussianBlur -> Canny", bordes, "gray"),
+    (f"Resultado final: {total} huecos\nProcesos: Gris -> CLAHE -> GaussianBlur -> Hough -> Filtro -> Punto y numero",
+     final, None),
+]
+for titulo, im, cmap in detalle:
+    plt.figure(figsize=(10, 8))
+    plt.imshow(im, cmap=cmap)
+    plt.title(titulo, fontsize=13)
+    plt.axis("off")
+    plt.show()
